@@ -1,5 +1,5 @@
 <%@ include file="/WEB-INF/template/include.jsp"%>
-<%@ include file="/WEB-INF/template/header.jsp"%>
+<%@ include file="/WEB-INF/view/module/mohbilling/templates/header.jsp"%>
 <%@ taglib prefix="billingtag"
 		   uri="/WEB-INF/view/module/mohbilling/taglibs/billingtag.tld"%>
 <%@ include file="templates/mohBillingLocalHeader.jsp"%>
@@ -51,12 +51,44 @@
 			$("#invalid_close").text("Please! Select Reverting Reason").show().fadeOut(4000);
 			event.preventDefault();
 		});
+		$("#btnSendVoucher").on("click",function(){
+			if (confirm("Are you sure you want to send the RHIP voucher?")) {
+				$("#sendVoucherForm").submit();
+			}
+		});
 	});
 </script>
 
 <h2>Global Bill # ${globalBill.billIdentifier} </h2>
 
 <%@ taglib uri="http://java.sun.com/jsp/jstl/fmt" prefix="fmt" %>
+
+<c:set var="voucherCode" value="${not empty sessionScope.rhipVoucherCode ? sessionScope.rhipVoucherCode : globalBill.rhipVoucherCode}" />
+<c:set var="voucherReferenceNumber" value="${not empty sessionScope.rhipVoucherReferenceNumber ? sessionScope.rhipVoucherReferenceNumber : globalBill.rhipVoucherReferenceNumber}" />
+<c:set var="voucherStatus" value="${sessionScope.rhipVoucherStatus}" />
+<c:if test="${not empty voucherCode or not empty voucherReferenceNumber or not empty voucherStatus}">
+	<b class="boxHeader">RHIP Voucher Receipt</b>
+	<div class="box">
+		<table>
+			<tr>
+				<td>Voucher Code:</td>
+				<td><b>${voucherCode}</b></td>
+			</tr>
+			<tr>
+				<td>Reference Number:</td>
+				<td><b>${voucherReferenceNumber}</b></td>
+			</tr>
+			<!--<tr>
+				<td>Status:</td>
+				<td><b>${voucherStatus}</b></td>
+			</tr>-->
+		</table>
+	</div>
+	<c:remove var="rhipVoucherCode" scope="session"/>
+	<c:remove var="rhipVoucherReferenceNumber" scope="session"/>
+	<c:remove var="rhipVoucherStatus" scope="session"/>
+	<br/>
+</c:if>
 
 <c:set var="ipCardNumber" value="${globalBill.admission.insurancePolicy.insuranceCardNo}" />
 <c:set var="globalBillId" value="${globalBill.globalBillId}" />
@@ -113,7 +145,10 @@
 <c:if test="${!globalBill.closed}">
 	<div style="float: left;">
 		<openmrs:hasPrivilege privilege="Add Consommation">
+	<openmrs:globalProperty var="disableManualAddBillForNonePrivateInsurance" key="billing.disableManualAddBillForNonePrivateInsurance"  />
+      <c:if test="${(disableManualAddBillForNonePrivateInsurance == true && globalBill.insurance.category =='NONE') || disableManualAddBillForNonePrivateInsurance == false}">
 			<a href="billing.form?insurancePolicyId=${insurancePolicy.insurancePolicyId}&ipCardNumber=${ipCardNumber}&globalBillId=${globalBillId}">Add Consommation |</a>
+      </c:if>
 		</openmrs:hasPrivilege>
 		<openmrs:hasPrivilege privilege="Discharge Patient">
 			<button id="btn">Discharge Patient</button>
@@ -121,13 +156,24 @@
 		</openmrs:hasPrivilege>
 	</div>
 </c:if>
-<c:if test="${globalBill.closed==true}">
-	<div style="float: left;">
-		<button id="btnRevert">Edit Global Bill</button>
-	</div>
+<openmrs:hasPrivilege privilege="Revert Patient Bill">
+	<c:if test="${globalBill.closed==true}">
+		<div style="float: left;">
+			<button id="btnRevert">Edit Global Bill</button>
+		</div>
 
+	</c:if>
+</openmrs:hasPrivilege>
+<c:if test="${globalBill.closed==true && insurancePolicy.insurance.category == 'MUTUELLE' && empty globalBill.rhipVoucherCode}">
+	<div style="float: left; margin-left: 10px;">
+		<button id="btnSendVoucher">Send RHIP Voucher</button>
+	</div>
+	<form action="viewGlobalBill.form" method="post" id="sendVoucherForm" style="display: none;">
+		<input type="hidden" name="globalBillId" value="${globalBill.globalBillId}" />
+		<input type="hidden" name="send_voucher" value="true" />
+	</form>
 </c:if>
-<div id="revert_discharge">
+<!-- <div id="revert_discharge_error">
 	<form action="viewGlobalBill.form?globalBillId=${globalBill.globalBillId}&edit_global_bill=true&revert_global_bill=${revert_global_bill}" method="post" id="revertGB">
 		<table>
 			<tr><td style="font-size:15px">Names</td><td> : <b>${insurancePolicy.owner.personName }</b></td></tr>
@@ -153,7 +199,7 @@
 			</tr>
 		</table>
 	</form>
-</div>
+</div> -->
 
 <div id="revert_discharge">
     <openmrs:hasPrivilege privilege="Revert Patient Bill">
@@ -275,5 +321,4 @@
 	</table>
 </div>
 <%@ include file="templates/dischargePatient.jsp"%>
-<%@ include file="/WEB-INF/template/footer.jsp"%>
-
+<%@ include file="/WEB-INF/view/module/mohbilling/templates/footer.jsp"%>

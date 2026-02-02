@@ -1,5 +1,5 @@
 <%@ include file="/WEB-INF/template/include.jsp"%>
-<%@ include file="/WEB-INF/template/header.jsp"%>
+<%@ include file="/WEB-INF/view/module/mohbilling/templates/header.jsp"%>
 <openmrs:htmlInclude file="/scripts/calendar/calendar.js" />
 <openmrs:require privilege="Manage Billing Reports" otherwise="/login.htm" redirect="/module/@MODULE_ID@/cohort.form" />
 <%@ include file="templates/mohBillingLocalHeader.jsp"%>
@@ -51,6 +51,8 @@ a.print {
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+
+
 <a href="cohort.form?print=true" class="print">PDF</a></b>
 <div class="box">
 <table width="99%">
@@ -62,7 +64,7 @@ a.print {
 		<td>Policy Id Number</td>
 		<td>Beneficiary</td>
 
-		<!-- <td>Billable Services</td> -->
+		<td>Billable Services</td>
 
 		<td>Insurance Name</td>
 		<td>Total</td>
@@ -94,7 +96,7 @@ a.print {
 			<c:set var="insuranceRate" value="${(c.beneficiary.insurancePolicy.insurance.currentRate.rate)/100 }"/>
             <c:set var="patientRate" value="${(100-c.beneficiary.insurancePolicy.insurance.currentRate.rate)/100}"/>
 			<c:set var="totalAmountByConsom" value="${c.insuranceBill.amount + c.patientBill.amount}" />
-			<%--
+			
 			<td class="rowValue">
 
 			<table>
@@ -125,35 +127,22 @@ a.print {
 					</c:if>
 				</c:forEach>
 			</table>
-			</td> --%>
+			</td>
 			<c:set var="totalAmountPaidByCons" value="${billingtag:amountPaidByConsommation(c.consommationId)}"/>
-			<c:set var="dueToPatient" value="${totalAmountByConsom*patientRate}"/>
-			<c:set var="isFullyPaid" value="${totalAmountPaidByCons >= dueToPatient}"/>
-			<c:set var="billStatus" value="${billingtag:billStatus(totalAmountPaidByCons,dueToPatient)}"/>
 			<td class="rowValue">${c.beneficiary.insurancePolicy.insurance.name}</td>
 			<td class="rowAmountValue"><fmt:formatNumber value="${totalAmountByConsom}" type="number" pattern="#.##"/></td>
 			<td class="rowAmountValue"><fmt:formatNumber value="${totalAmountByConsom*insuranceRate }" type="number" pattern="#.##"/></td>
-			<td class="rowAmountValue"><fmt:formatNumber value="${dueToPatient}" type="number" pattern="#.##"/></td>
+			<td class="rowAmountValue"><fmt:formatNumber value="${totalAmountByConsom*patientRate }" type="number" pattern="#.##"/></td>
 			<td class="rowAmountValue"><fmt:formatNumber value="${totalAmountPaidByCons}" type="number" pattern="#.##"/></td>
-
-			<td class="rowAmountValue" style="font-weight: bold;
-				<c:choose>
-				<c:when test="${billStatus == 'FULLY PAID'}">
-						color: green;
-				</c:when>
-				<c:when test="${billStatus == 'PARTLY PAID'}">
-						color: orange;
-				</c:when>
-				<c:when test="${billStatus == 'UNPAID'}">
-						color: red;
-				</c:when>
-				<c:otherwise>
-						color: black; <!-- Default color -->
-				</c:otherwise>
-				</c:choose>
-					">
-					${billStatus}
-			</td>
+			<c:if test="${totalAmountPaidByCons >= (totalAmountByConsom*patientRate) && not empty c.patientBill.payments}">
+			<td class="rowAmountValue" style="color: green; font-weight: bold;">FULLY PAID</td>
+			</c:if>
+			<c:if test="${(totalAmountPaidByCons!='0') && (totalAmountPaidByCons < (totalAmountByConsom*patientRate)) && not empty not empty c.patientBill.payments}">
+			<td class="rowAmountValue" style="color: green; font-weight: bold;">PARTLY PAID</td>
+			</c:if>
+			<c:if test="${empty c.patientBill.payments}">
+				<td class="rowAmountValue" style="color: red; font-weight: bold;">UNPAID</td>
+            </c:if>
 
            <c:if test="${c.globalBill.admission.isAdmitted==true}">
            			<td class="rowAmountValue" style="color: blue; font-weight: bold;">In-Patient</td>
@@ -195,8 +184,7 @@ a.print {
 	</tr>
 </table>
 </div>
-
 </c:if>
 
 
-<%@ include file="/WEB-INF/template/footer.jsp"%>
+<%@ include file="/WEB-INF/view/module/mohbilling/templates/footer.jsp"%>

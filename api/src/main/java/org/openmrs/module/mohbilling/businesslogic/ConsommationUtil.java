@@ -223,7 +223,8 @@ public class ConsommationUtil {
 						quantity = BigDecimal.valueOf(Double.valueOf(request.getParameter("quantity_" + i)));
 						unitPrice = BigDecimal.valueOf(Double.valueOf(request.getParameter("servicePrice_" + i)));
 						drugf = request.getParameter("frequency_"+i);
-						psb = new PatientServiceBill(bs, hopService, new Date(), unitPrice, quantity, creator, new Date(),drugf);
+						item_type = bs.getFacilityServicePrice().getItemType().intValue();
+						psb = new PatientServiceBill(bs, hopService, new Date(), unitPrice, quantity, creator, new Date(),drugf,item_type); // <<<<<<<<<<<<<<<<<<< Here Suspect Number One
 						addedItemTotalAmount=addedItemTotalAmount.add(quantity.multiply(unitPrice));
 							if(existingItemsLoopControl==0) {
 								for (PatientServiceBill pp : existingConsom.getBillItems()) {
@@ -363,10 +364,10 @@ public class ConsommationUtil {
 		}
 		return found;
 	}
-	public static List<Consommation> getConsommations(Date startDate,
-													  Date endDate, Insurance insurance, ThirdParty tp,
-													  User billCreator,Department department, int recordsPerPage, int page){
-		return getService().getConsommations(startDate, endDate, insurance, tp, billCreator, department, recordsPerPage, page);
+    public static List<Consommation> getConsommations(Date startDate,
+                                                      Date endDate, Insurance insurance, ThirdParty tp,
+                                                      User billCreator,Department department){
+        return getService().getConsommations(startDate, endDate, insurance, tp, billCreator, department);
 	}
 	public static List<Consommation> getConsommationsWithPatientNotConfirmed(Date startDate,
 													  Date endDate) throws IOException {
@@ -392,13 +393,5 @@ public class ConsommationUtil {
 		psb.setVoidReason("removed");
 		psb.setVoidedDate(new Date());
 		ConsommationUtil.saveConsommation(psb.getConsommation());
-	}
-
-	public static int getTotalConsommations(Date startDate,
-											Date endDate, Insurance insurance, ThirdParty tp,
-											User billCreator, Department department) {
-		return getService().getTotalConsommations(startDate,
-				endDate, insurance, tp,
-				billCreator, department);
 	}
 }

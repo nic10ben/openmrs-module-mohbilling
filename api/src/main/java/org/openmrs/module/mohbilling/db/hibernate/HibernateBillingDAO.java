@@ -27,12 +27,17 @@ import org.openmrs.api.context.Context;
 import org.openmrs.api.db.DAOException;
 import org.openmrs.module.mohbilling.businesslogic.*;
 import org.openmrs.module.mohbilling.db.BillingDAO;
+import org.openmrs.module.mohbilling.db.ConnectionPoolManager;
+import org.openmrs.module.mohbilling.model.*;
 import org.openmrs.module.mohbilling.model.Transaction;
 import org.openmrs.module.mohbilling.model.*;
 import org.openmrs.module.mohbilling.service.BillingService;
-import org.openmrs.module.mohbilling.utils.Utils;
 
 import java.math.BigDecimal;
+import java.sql.CallableStatement;
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.text.DateFormat;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
@@ -109,29 +114,7 @@ public class HibernateBillingDAO implements BillingDAO {
                 .uniqueResult();
     }
 
-    @Override
-    public List<PatientBill> getPatientBillsByPagination(Integer startIndex, Integer pageSize,
-                                                         String orderBy, String orderDirection) throws DAOException {
 
-        Criteria criteria = sessionFactory.getCurrentSession()
-                .createCriteria(PatientBill.class)
-                .setFirstResult(startIndex)
-                .setMaxResults(pageSize);
-
-        // Add ordering
-        if (orderBy != null) {
-            if ("desc".equalsIgnoreCase(orderDirection)) {
-                criteria.addOrder(Order.desc(orderBy));
-            } else {
-                criteria.addOrder(Order.asc(orderBy));
-            }
-        } else {
-            // Default order by createdDate desc
-            criteria.addOrder(Order.desc("createdDate"));
-        }
-
-        return criteria.list();
-    }
 
     /**
      * (non-Javadoc)
@@ -1016,11 +999,12 @@ public class HibernateBillingDAO implements BillingDAO {
 		/*bui.append(" WHEN i.category = 'MUTUELLE' THEN (full_price/2)");
 		bui.append(" WHEN i.category = 'PRIVATE' THEN (full_price*1.25)");
 		bui.append(" WHEN i.category = 'NONE' THEN (full_price*1.5)");*/
-        bui.append(" WHEN i.category = 'MUTUELLE' THEN (CEIL(full_price/2))");
-        bui.append(" WHEN i.category = 'RSSB' THEN (CEIL(full_price*1.25))");
-        bui.append(" WHEN i.category = 'MMI_UR' THEN (CEIL(full_price*1.15))");
-        bui.append(" WHEN i.category = 'PRIVATE' THEN (CEIL(full_price*1.4375))");
-        bui.append(" WHEN i.category = 'NONE' THEN (CEIL(full_price*1.725))");
+        bui.append(" WHEN i.category = 'MUTUELLE' THEN (CEIL(full_price*1))");
+        bui.append(" WHEN i.category = 'RSSB' THEN (CEIL(full_price*1))");
+        bui.append(" WHEN i.category = 'PRIVATE' THEN (CEIL(full_price*1))");
+        bui.append(" WHEN i.category = 'EAST_AFRICA' THEN (CEIL(full_price*1))");
+        bui.append(" WHEN i.category = 'AFRICA' THEN (CEIL(full_price*1))");
+        bui.append(" WHEN i.category = 'INTERNATIONAL' THEN (CEIL(full_price*1))");
         bui.append(" ELSE full_price END as maxima_to_pay,");
         bui.append(" fsp.start_date, fsp.facility_service_price_id, sc.service_category_id, fsp.created_date, fsp" +
                 ".retired, fsp.creator ");
@@ -1427,9 +1411,11 @@ public class HibernateBillingDAO implements BillingDAO {
         List<PaidServiceBill> paidItems = new ArrayList<PaidServiceBill>();
         paidItems = criteria.list();
 
-        Consommation c = ConsommationUtil.getConsommationByPatientBill(payments.get(0).getPatientBill());
-        if (c.getGlobalBill().getBillIdentifier().substring(0, 4).equals("bill")) {
-            paidItems = BillPaymentUtil.getOldPaidItems(payments);
+        if(payments.size() > 0){
+            Consommation c = ConsommationUtil.getConsommationByPatientBill(payments.get(0).getPatientBill());
+            if (c.getGlobalBill().getBillIdentifier().substring(0, 4).equals("bill")) {
+                paidItems = BillPaymentUtil.getOldPaidItems(payments);
+            }
         }
         //List<PaidServiceBill> oldItems = BillPaymentUtil.getOldPaidItems(payments);
 //	      		if(oldItems!=null){
@@ -1477,145 +1463,128 @@ public class HibernateBillingDAO implements BillingDAO {
 
     @Override
     public InsuranceReport getBillItemsByCategoryFromMamba(Integer insuranceIdentifier, Date startDate, Date endDate) {
-
-        System.out.println("parameters for sp insurance : " + insuranceIdentifier);
-        System.out.println("parameters for sp start_date: " + startDate);
-        System.out.println("parameters for sp end_date  : " + endDate);
-
-        System.out.println("Starting.. to Fetch items from MambaETL tables");
-
+        logParameters(insuranceIdentifier, startDate, endDate);
         InsuranceReport report = new InsuranceReport();
 
+        try (Connection connection = ConnectionPoolManager.getInstance().getEtlDataSource().getConnection();
+             CallableStatement callableStatement = prepareCallableStatement(connection, insuranceIdentifier, startDate, endDate);
+             ResultSet resultSet = callableStatement.executeQuery()) {
+
+            processResultSet(resultSet, report, insuranceIdentifier);
+
+        } catch (SQLException e) {
+            log.error("Error while fetching insurance report from MambaETL tables", e);
+        }
+
+        log.info("Done Fetching Insurance Report of size: " + report.getReportItems().size());
+        return report;
+    }
+
+    private CallableStatement prepareCallableStatement(Connection connection, Integer insuranceIdentifier, Date startDate, Date endDate) throws SQLException {
+        CallableStatement callableStatement = connection.prepareCall("{CALL sp_mamba_fact_insurance_report_query(?, ?, ?)}");
+        callableStatement.setInt(1, insuranceIdentifier);
+        callableStatement.setDate(2, new java.sql.Date(startDate.getTime()));
+        callableStatement.setDate(3, new java.sql.Date(endDate.getTime()));
+        return callableStatement;
+    }
+
+    private void processResultSet(ResultSet resultSet, InsuranceReport report, Integer insuranceIdentifier) throws SQLException {
         DateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd");
 
-        long startTime = System.nanoTime();
-        SQLQuery billingReportQuery = sessionFactory.getCurrentSession().createSQLQuery(
-                "CALL sp_mamba_fact_insurance_report_query(:insurance_id, :start_date, :end_date)");
-
-        long endTime = System.nanoTime();
-        double elapsedTimeInSeconds = (endTime - startTime) / 1e9; // Convert nanoseconds to seconds
-
-        billingReportQuery.setParameter("insurance_id", insuranceIdentifier);
-        billingReportQuery.setParameter("start_date", startDate);
-        billingReportQuery.setParameter("end_date", endDate);
-        //TODO: Create a hibernate Object for this result-set type
-        List<Object[]> resultSet = billingReportQuery.list();
-
-        System.out.println("It took MambaETL: " + elapsedTimeInSeconds + " seconds to retrieve: " + resultSet.size() + " items");
-
-
-        Insurance insurance = InsuranceUtil.getInsurance(insuranceIdentifier);
-        InsuranceRate insuranceRate = insurance.getCurrentRate();
-        Float insuranceFirmRate = insuranceRate.getRate();
-        Float insurancePatientRate = 100 - insuranceRate.getRate();
-
-        //Double totalInsuranceFirm = 0.9 * total;
-
-        for (Object[] objects : resultSet) {
-
-            Integer id = (objects[0] != null) ? Integer.parseInt(objects[0].toString()) : null;
-            Date admissionDate = null;
-            try {
-                admissionDate = (objects[1] != null) ? dateFormat.parse(objects[1].toString().substring(0, 10)) : null;
-            } catch (ParseException e) {
-                e.printStackTrace();
-            }
-            Date closingDate = null;
-            try {
-                closingDate = (objects[2] != null) ? dateFormat.parse(objects[2].toString().substring(0, 10)) : null;
-            } catch (ParseException e) {
-                e.printStackTrace();
-            }
-            String beneficiaryName = (objects[3] != null) ? objects[3].toString() : null;
-            String houseHoldHeadName = (objects[4] != null) ? objects[4].toString() : null;
-            String familyCode = (objects[5] != null) ? objects[5].toString() : null;
-            Integer beneficiaryLevel = (objects[6] != null) ? Integer.parseInt(objects[6].toString()) : null;
-            String cardNumber = (objects[7] != null) ? objects[7].toString() : null;
-            String companyName = (objects[8] != null) ? objects[8].toString() : null;
-            Integer age = (objects[9] != null) ? Integer.parseInt(objects[9].toString()) : null;
-            Date birthDate = null;
-            try {
-                birthDate = (objects[10] != null) ? dateFormat.parse(objects[10].toString().substring(0, 10)) : null;
-            } catch (ParseException e) {
-                e.printStackTrace();
-            }
-            String gender = (objects[11] != null) ? objects[11].toString() : null;
-            String doctorName = (objects[12] != null) ? objects[12].toString() : null;
-            Integer insuranceId = (objects[13] != null) ? Integer.parseInt(objects[13].toString()) : null;
-            Integer globalBillId = (objects[14] != null) ? Integer.parseInt(objects[14].toString()) : null;
-            String globalBillIdentifier = (objects[15] != null) ? objects[15].toString() : null;
-
-            //services
-            Double medicament = (objects[16] != null) ? Double.parseDouble(objects[16].toString()) : 0;
-            Double consultation = (objects[17] != null) ? Double.parseDouble(objects[17].toString()) : 0;
-            Double hospitalisation = (objects[18] != null) ? Double.parseDouble(objects[18].toString()) : 0;
-            Double laboratoire = (objects[19] != null) ? Double.parseDouble(objects[19].toString()) : 0;
-            Double formaliteAdministratives = (objects[20] != null) ? Double.parseDouble(objects[20].toString()) : 0;
-            Double ambulance = (objects[21] != null) ? Double.parseDouble(objects[21].toString()) : 0;
-            Double consommables = (objects[22] != null) ? Double.parseDouble(objects[22].toString()) : 0;
-            Double oxygenotherapie = (objects[23] != null) ? Double.parseDouble(objects[23].toString()) : 0;
-            Double imaging = (objects[24] != null) ? Double.parseDouble(objects[24].toString()) : 0;
-            Double proced = (objects[25] != null) ? Double.parseDouble(objects[25].toString()) : 0;
-
+        while (resultSet.next()) {
             InsuranceReportItem reportItem = new InsuranceReportItem();
-            reportItem.setId(id);
-            reportItem.setAdmissionDate(admissionDate);
-            reportItem.setClosingDate(closingDate);
-            reportItem.setBeneficiaryName(beneficiaryName);
-            reportItem.setHouseholdHeadName(houseHoldHeadName);
-            reportItem.setFamilyCode(familyCode);
-            reportItem.setBeneficiaryLevel(beneficiaryLevel);
-            reportItem.setCardNumber(cardNumber);
-            reportItem.setCompanyName(companyName);
-            reportItem.setAge(age);
-            reportItem.setBirthDate(birthDate);
-            reportItem.setGender(gender);
-            reportItem.setDoctorName(doctorName);
-            reportItem.setInsuranceId(insuranceId);
-            reportItem.setGlobalBillId(globalBillId);
-            reportItem.setGlobalBillIdentifier(globalBillIdentifier);
+            reportItem.setId(getInteger(resultSet, 1));
+            reportItem.setAdmissionDate(getDate(resultSet, 2, dateFormat));
+            reportItem.setClosingDate(getDate(resultSet, 3, dateFormat));
+            reportItem.setBeneficiaryName(resultSet.getString(4));
+            reportItem.setHouseholdHeadName(resultSet.getString(5));
+            reportItem.setFamilyCode(resultSet.getString(6));
+            reportItem.setBeneficiaryLevel(getInteger(resultSet, 7));
+            reportItem.setCardNumber(resultSet.getString(8));
+            reportItem.setCompanyName(resultSet.getString(9));
+            reportItem.setAge(getInteger(resultSet, 10));
+            reportItem.setBirthDate(getDate(resultSet, 11, dateFormat));
+            reportItem.setGender(resultSet.getString(12));
+            reportItem.setDoctorName(resultSet.getString(13));
+            reportItem.setInsuranceId(getInteger(resultSet, 14));
+            reportItem.setGlobalBillId(getInteger(resultSet, 15));
+            reportItem.setGlobalBillIdentifier(resultSet.getString(16));
 
-            reportItem.setMedicament(medicament);
-            reportItem.setConsultation(consultation);
-            reportItem.setHospitalisation(hospitalisation);
-            reportItem.setLaboratoire(laboratoire);
-            reportItem.setFormaliteAdministratives(formaliteAdministratives);
-            reportItem.setAmbulance(ambulance);
-            reportItem.setConsommables(consommables);
-            reportItem.setOxygenotherapie(oxygenotherapie);
-            reportItem.setImaging(imaging);
-            reportItem.setProced(proced);
+            // Services
+            reportItem.setConsultation(getDouble(resultSet, 17));
+            reportItem.setLaboratoire(getDouble(resultSet, 18));
+            reportItem.setHospitalisation(getDouble(resultSet, 19));
+            reportItem.setFormaliteAdministratives(getDouble(resultSet, 20));
+            reportItem.setAmbulance(getDouble(resultSet, 21));
+            reportItem.setConsommables(getDouble(resultSet, 22));
+            reportItem.setMedicament(getDouble(resultSet, 23));
+            reportItem.setImaging(getDouble(resultSet, 24));
+            reportItem.setProced(getDouble(resultSet, 25));
 
-            Double total =
-                    medicament + consultation + hospitalisation + laboratoire + formaliteAdministratives + ambulance + consommables + oxygenotherapie + imaging + proced;
-            Double totalInsuranceFirm = (insuranceFirmRate / 100) * total;
-
-            reportItem.setTotal100(total);
-            reportItem.setTotalInsurance(totalInsuranceFirm);
-            reportItem.setTotalPatient(total - totalInsuranceFirm);
-
-            report.addReportItem(reportItem);
-
-            report.addServiceRevenue("MEDICAMENTS", BigDecimal.valueOf(medicament));
-            report.addServiceRevenue("CONSULTATION", BigDecimal.valueOf(consultation));
-            report.addServiceRevenue("HOSPITALISATION", BigDecimal.valueOf(hospitalisation));
-            report.addServiceRevenue("LABORATOIRE", BigDecimal.valueOf(laboratoire));
-            report.addServiceRevenue("FORMALITES ADMINISTRATIVES", BigDecimal.valueOf(formaliteAdministratives));
-            report.addServiceRevenue("AMBULANCE", BigDecimal.valueOf(ambulance));
-            report.addServiceRevenue("CONSOMMABLES", BigDecimal.valueOf(consommables));
-            report.addServiceRevenue("OXYGENOTHERAPIE", BigDecimal.valueOf(oxygenotherapie));
-            report.addServiceRevenue("IMAGING", BigDecimal.valueOf(imaging));
-            report.addServiceRevenue("PROCED.", BigDecimal.valueOf(proced));
-
-            report.addServiceRevenue("100%", BigDecimal.valueOf(reportItem.getTotal100()));
-            report.addServiceRevenue("Insurance (" + insuranceFirmRate + "%)",
-                    BigDecimal.valueOf(reportItem.getTotalInsurance()));
-            report.addServiceRevenue("Patient (" + insurancePatientRate + "%)",
-                    BigDecimal.valueOf(reportItem.getTotalPatient()));
+            calculateAndSetTotals(reportItem, insuranceIdentifier);
+            addItemToReport(reportItem, report, insuranceIdentifier);
         }
-        System.out.println("Done Fetching Insurance Report of size: " + report.getReportItems().size() + ", from " +
-                "MambaETL tables");
-        return report;
+    }
+
+    private Integer getInteger(ResultSet resultSet, int columnIndex) throws SQLException {
+        return resultSet.getObject(columnIndex) != null ? resultSet.getInt(columnIndex) : null;
+    }
+
+    private Date getDate(ResultSet resultSet, int columnIndex, DateFormat dateFormat) {
+        try {
+            return resultSet.getObject(columnIndex) != null ? dateFormat.parse(resultSet.getString(columnIndex).substring(0, 10)) : null;
+        } catch (SQLException | ParseException e) {
+            log.error("Error parsing date from ResultSet", e);
+            return null;
+        }
+    }
+
+    private Double getDouble(ResultSet resultSet, int columnIndex) throws SQLException {
+        return resultSet.getObject(columnIndex) != null ? resultSet.getDouble(columnIndex) : 0;
+    }
+
+    private void calculateAndSetTotals(InsuranceReportItem reportItem, Integer insuranceIdentifier) {
+        double total =  reportItem.getConsultation() +
+                reportItem.getLaboratoire() + reportItem.getHospitalisation() + reportItem.getFormaliteAdministratives() +
+                reportItem.getAmbulance() + reportItem.getConsommables() + reportItem.getMedicament() +
+                reportItem.getImaging() + reportItem.getProced();
+
+        double insuranceFirmRate = getInsuranceFirmRate(insuranceIdentifier);
+        double totalInsuranceFirm = (insuranceFirmRate / 100) * total;
+
+        reportItem.setTotal100(total);
+        reportItem.setTotalInsurance(totalInsuranceFirm);
+        reportItem.setTotalPatient(total - totalInsuranceFirm);
+    }
+
+    private void addItemToReport(InsuranceReportItem reportItem, InsuranceReport report, Integer insuranceIdentifier) {
+        report.addReportItem(reportItem);
+        report.addServiceRevenue("CONSULTATION", BigDecimal.valueOf(reportItem.getConsultation()));
+        report.addServiceRevenue("LABORATOIRE", BigDecimal.valueOf(reportItem.getLaboratoire()));
+        report.addServiceRevenue("HOSPITALISATION", BigDecimal.valueOf(reportItem.getHospitalisation()));
+        report.addServiceRevenue("FORMALITES ADMINISTRATIVES", BigDecimal.valueOf(reportItem.getFormaliteAdministratives()));
+        report.addServiceRevenue("AMBULANCE", BigDecimal.valueOf(reportItem.getAmbulance()));
+        report.addServiceRevenue("CONSOMMABLES", BigDecimal.valueOf(reportItem.getConsommables()));
+        report.addServiceRevenue("MEDICAMENTS", BigDecimal.valueOf(reportItem.getMedicament()));
+        report.addServiceRevenue("IMAGING", BigDecimal.valueOf(reportItem.getImaging()));
+        report.addServiceRevenue("PROCED.", BigDecimal.valueOf(reportItem.getProced()));
+        report.addServiceRevenue("100%", BigDecimal.valueOf(reportItem.getTotal100()));
+        report.addServiceRevenue("Insurance (" + getInsuranceFirmRate(insuranceIdentifier) + "%)", BigDecimal.valueOf(reportItem.getTotalInsurance()));
+        report.addServiceRevenue("Patient (" + getInsurancePatientRate(insuranceIdentifier) + "%)", BigDecimal.valueOf(reportItem.getTotalPatient()));
+    }
+
+    private double getInsuranceFirmRate(Integer insuranceIdentifier) {
+        return InsuranceUtil.getInsuranceFirmRate(insuranceIdentifier);
+    }
+
+    private double getInsurancePatientRate(Integer insuranceIdentifier) {
+        return InsuranceUtil.getInsurancePatientRate(insuranceIdentifier);
+    }
+
+    private void logParameters(Integer insuranceIdentifier, Date startDate, Date endDate) {
+        log.info("parameters for sp insurance : " + insuranceIdentifier);
+        log.info("parameters for sp start_date: " + startDate);
+        log.info("parameters for sp end_date  : " + endDate);
     }
 
     @Override
@@ -1705,96 +1674,106 @@ public class HibernateBillingDAO implements BillingDAO {
     }
 
     @Override
-    public int getTotalConsommations(Date startDate, Date endDate, Insurance insurance, ThirdParty tp,
-                                     User billCreator, Department department) {
-        Session session = sessionFactory.getCurrentSession();
-
-        StringBuilder combinedSearch = generateConsommationsQuery("SELECT count(*) FROM moh_bill_consommation c ",insurance, tp, billCreator, department);
-
-        Query query = session.createSQLQuery(combinedSearch.toString())
-                .setParameter("startDate", Utils.formatDateForQuery(startDate, true))
-                .setParameter("endDate", Utils.formatDateForQuery(endDate, false));
-
-        fillConsommationsQueryBaseParams(insurance, tp, billCreator, department, query);
-
-        return Integer.parseInt(query.list().get(0).toString());
-    }
+//    public int getTotalConsommations(Date startDate, Date endDate, Insurance insurance, ThirdParty tp,
+//                                     User billCreator, Department department) {
+//        Session session = sessionFactory.getCurrentSession();
+//
+//        StringBuilder combinedSearch = generateConsommationsQuery("SELECT count(*) FROM moh_bill_consommation c ",insurance, tp, billCreator, department);
+//
+//        Query query = session.createSQLQuery(combinedSearch.toString())
+//                .setParameter("startDate", Utils.formatDateForQuery(startDate, true))
+//                .setParameter("endDate", Utils.formatDateForQuery(endDate, false));
+//
+//        fillConsommationsQueryBaseParams(insurance, tp, billCreator, department, query);
+//
+//        return Integer.parseInt(query.list().get(0).toString());
+//    }
 
     /* (non-Javadoc)
      * @see org.openmrs.module.mohbilling.db.BillingDAO#getConsommations(java.util.Date, java.util.Date, org.openmrs
      * .module.mohbilling.model.Insurance, org.openmrs.module.mohbilling.model.ThirdParty, org.openmrs.User)
      */
-    @Override
     public List<Consommation> getConsommations(Date startDate,
                                                Date endDate, Insurance insurance, ThirdParty tp,
-                                               User billCreator, Department department, int limit, int offSet) {
-        if (startDate == null || endDate == null) {
-            return new ArrayList<>();
-        }
-
+                                               User billCreator, Department department) {
         Session session = sessionFactory.getCurrentSession();
+        DateFormat df = new SimpleDateFormat("yyyy-MM-dd");
+        StringBuilder combinedSearch = new StringBuilder("");
 
-        StringBuilder combinedSearch = generateConsommationsQuery("SELECT c.* FROM moh_bill_consommation c ",insurance, tp, billCreator, department);
-
-        combinedSearch.append(" LIMIT :limit OFFSET :offSet");
-
-        Query query = session.createSQLQuery(combinedSearch.toString())
-                .addEntity("c", Consommation.class)
-                .setParameter("startDate", Utils.formatDateForQuery(startDate, true))
-                .setParameter("endDate", Utils.formatDateForQuery(endDate, false));
-
-        fillConsommationsQueryBaseParams(insurance, tp, billCreator, department, query);
-
-        // Setting limit and off set to default if zero is provided to avoid performance degradation
-        query.setParameter("limit", limit == 0 ? 100 : limit);
-        query.setParameter("offSet", offSet == 0 ? 1 : offSet);
-
-
-        return query.list();
-    }
-
-    private static void fillConsommationsQueryBaseParams(Insurance insurance, ThirdParty tp, User billCreator,
-                                                         Department department, Query query) {
-        if (insurance != null) {
-            query.setParameter("insuranceId", insurance.getInsuranceId());
-        }
-        if (tp != null) {
-            query.setParameter("thirdPartyId", tp.getThirdPartyId());
-        }
-        if (billCreator != null) {
-            query.setParameter("billCreatorId", billCreator.getUserId());
-        }
-        if (department != null) {
-            query.setParameter("departmentId", department.getDepartmentId());
-        }
-    }
-
-    private static StringBuilder generateConsommationsQuery(String baseQuery, Insurance insurance, ThirdParty tp, User billCreator,
-                                                            Department department) {
-        StringBuilder combinedSearch = new StringBuilder(baseQuery)
-                .append("INNER JOIN moh_bill_patient_bill pb ON pb.patient_bill_id = c.patient_bill_id ")
-                .append("AND c.created_date BETWEEN :startDate AND :endDate");
+        combinedSearch.append("SELECT c.* FROM moh_bill_consommation c "
+                + " inner join moh_bill_patient_bill pb on pb.patient_bill_id=c.patient_bill_id"
+                + " and c.created_date between '" + df.format(startDate) + " 00:00:00 " + "' AND '" + df.format(endDate) + " 23:59:59'");
 
         if (insurance != null || tp != null) {
             combinedSearch
-                    .append(" INNER JOIN moh_bill_beneficiary b ON b.beneficiary_id=c.beneficiary_id ")
-                    .append(" INNER JOIN moh_bill_insurance_policy ip ON ip.insurance_policy_id=b.insurance_policy_id ")
-                    .append(" INNER JOIN moh_bill_insurance i ON i.insurance_id = ip.insurance_id ");
+                    .append(" inner join moh_bill_beneficiary b on b.beneficiary_id=c.beneficiary_id "
+                            + " inner join moh_bill_insurance_policy ip on ip.insurance_policy_id=b.insurance_policy_id "
+                            + " inner join moh_bill_insurance i on i.insurance_id = ip.insurance_id "
+                    );
 
             if (insurance != null)
-                combinedSearch.append(" AND i.insurance_id = :insuranceId");
+                combinedSearch.append(" and i.insurance_id ='" + insurance.getInsuranceId() + "'");
 
             if (tp != null)
-                combinedSearch.append(" AND ip.third_party_id = :thirdPartyId");
+                combinedSearch.append(" and ip.third_party_id ='" + tp.getThirdPartyId() + "'");
         }
 
         if (billCreator != null)
-            combinedSearch.append(" AND c.creator = :billCreatorId");
+            combinedSearch.append(" and c.creator ='" + billCreator.getUserId() + "'");
 
         if (department != null)
-            combinedSearch.append(" AND c.department_id = :departmentId");
-        return combinedSearch;
+            combinedSearch.append(" and c.department_id ='" + department.getDepartmentId() + "'");
+
+        List<Consommation> consommations = session
+                .createSQLQuery(combinedSearch.toString())
+                .addEntity("c", Consommation.class).list();
+
+        return consommations;
     }
+
+
+//    private static void fillConsommationsQueryBaseParams(Insurance insurance, ThirdParty tp, User billCreator,
+//                                                         Department department, Query query) {
+//        if (insurance != null) {
+//            query.setParameter("insuranceId", insurance.getInsuranceId());
+//        }
+//        if (tp != null) {
+//            query.setParameter("thirdPartyId", tp.getThirdPartyId());
+//        }
+//        if (billCreator != null) {
+//            query.setParameter("billCreatorId", billCreator.getUserId());
+//        }
+//        if (department != null) {
+//            query.setParameter("departmentId", department.getDepartmentId());
+//        }
+//    }
+//
+//    private static StringBuilder generateConsommationsQuery(String baseQuery, Insurance insurance, ThirdParty tp, User billCreator,
+//                                                            Department department) {
+//        StringBuilder combinedSearch = new StringBuilder(baseQuery)
+//                .append("INNER JOIN moh_bill_patient_bill pb ON pb.patient_bill_id = c.patient_bill_id ")
+//                .append("AND c.created_date BETWEEN :startDate AND :endDate");
+//
+//        if (insurance != null || tp != null) {
+//            combinedSearch
+//                    .append(" INNER JOIN moh_bill_beneficiary b ON b.beneficiary_id=c.beneficiary_id ")
+//                    .append(" INNER JOIN moh_bill_insurance_policy ip ON ip.insurance_policy_id=b.insurance_policy_id ")
+//                    .append(" INNER JOIN moh_bill_insurance i ON i.insurance_id = ip.insurance_id ");
+//
+//            if (insurance != null)
+//                combinedSearch.append(" AND i.insurance_id = :insuranceId");
+//
+//            if (tp != null)
+//                combinedSearch.append(" AND ip.third_party_id = :thirdPartyId");
+//        }
+//
+//        if (billCreator != null)
+//            combinedSearch.append(" AND c.creator = :billCreatorId");
+//
+//        if (department != null)
+//            combinedSearch.append(" AND c.department_id = :departmentId");
+//        return combinedSearch;
+//    }
 
     @Override
     public List<Consommation> getConsommationsWithPatientNotConfirmed(Date startDate,
@@ -1892,19 +1871,22 @@ public class HibernateBillingDAO implements BillingDAO {
     @Override
     public GlobalBill getOpenGlobalBillByInsuranceCardNo(String insuranceCardNo) {
         try {
-            Criteria crit = sessionFactory.getCurrentSession().createCriteria(GlobalBill.class)
-                    .add(Restrictions.like("billIdentifier", insuranceCardNo + "%")).add(Restrictions.eq("closed",
-                            false));
-
-            System.out.println("Find GBBBBBBBBBBBBBBBBBBBBBBBBBB: " + crit.list().size());
-
-            GlobalBill globalBill = (GlobalBill) crit.uniqueResult();
-
-
-            return globalBill;
+            Criteria crit = sessionFactory.getCurrentSession().createCriteria(GlobalBill.class, "globalBill");
+            crit.add(Restrictions.eq("closed", false));
+            crit.createAlias("globalBill.admission", "admission");
+            crit.createAlias("admission.insurancePolicy", "insurancePolicy");
+            crit.add(Restrictions.eq("insurancePolicy.insuranceCardNo", insuranceCardNo));
+            List<GlobalBill> bills = crit.list();
+            if (bills.size() == 1) {
+                return bills.get(0);
+            }
+            if (bills.size() > 1) {
+                log.warn("Found " + bills.size() + " GB(s) with insuranceCardNo " + insuranceCardNo + ", returning null");
+            }
         } catch (Exception e) {
-            return null;
+            log.error("Error getting open global bill", e);
         }
+        return null;
     }
 
     @Override
@@ -1924,4 +1906,16 @@ public class HibernateBillingDAO implements BillingDAO {
                 .add(Restrictions.eq("name", name)).add(Restrictions.eq("retired", false)).uniqueResult();
     }
 
+    @Override
+    public String getDiagnosisFromAdmissionToDischarge(String primaryAndSecondaryDiagnosis, String startDate, String endDate, Integer patientid) {
+        StringBuilder queryString = new StringBuilder("");
+        queryString.append("select group_concat((select name from concept_name where concept_id=value_coded limit 1)) as Diagnosis from obs where concept_id in ("+primaryAndSecondaryDiagnosis+") and obs_datetime>= '"+startDate+"' and obs_datetime<= '"+endDate+"' and person_id="+patientid+" and voided=0 group by person_id");
+        Query query = sessionFactory.getCurrentSession().createSQLQuery(queryString.toString());
+        List<String> Diagnosis = query.list();
+        if(Diagnosis.size()==0){
+            return "";
+        }else {
+            return Diagnosis.get(0);
+        }
+    }
 }
